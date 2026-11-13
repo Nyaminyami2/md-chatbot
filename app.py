@@ -197,6 +197,73 @@ else:
             st.rerun()
 
 
+
+# ───────────────── ✏️ MD팀: 글씨색·이미지 표시 ─────────────────
+# 프롬프트문 규칙에 따라 챗봇이 붙인 표시를 화면에서 바꾼다.
+#   <doubt>…</doubt>  → 빨간 글씨 (의심·추측·확인되지 않은 생각)
+#   <think>…</think>  → 회색 글씨 (속마음·행동)
+#   [이미지:파일이름]  → 저장소 images 폴더의 파일이름.png 를 답변 아래에 표시
+import re
+
+IMAGE_DIR = APP_DIR / "images"
+IMAGE_TAG = re.compile(r"\[이미지:\s*([\w\-]+)\s*\]")
+
+
+def format_text(text):
+    text = re.sub(r"<\s*think\s*>(.*?)<\s*/\s*think\s*>",
+                  r'<span style="color:#888888;">\1</span>', text, flags=re.S | re.I)
+    text = re.sub(r"<\s*doubt\s*>(.*?)<\s*/\s*doubt\s*>",
+                  r'<span style="color:#FF4B4B;">\1</span>', text, flags=re.S | re.I)
+    return text
+
+
+def show_message(content):
+    names = IMAGE_TAG.findall(content)
+    st.markdown(format_text(IMAGE_TAG.sub("", content)), unsafe_allow_html=True)
+    for name in names:
+        f = IMAGE_DIR / f"{name}.png"
+        if f.exists():
+            st.image(str(f))
+
+
+# ───────────────── ✏️ MD팀: 전시 모드 대화 기록 (연구 자료) ─────────────────
+# 전시 모드에서 질문과 답변이 오갈 때마다 서버의 기록 파일에 한 줄씩 쌓는다.
+# 연구자는 화면 맨 아래 "연구자용"에서 Secrets의 ADMIN_CODE를 입력해 전체 기록을 내려받는다.
+# 주의: 이 파일은 앱이 다시 시작되면(저장소에 새 파일을 올려 재배포될 때 등) 사라진다.
+import json
+import uuid
+
+LOG_DIR = APP_DIR / "exhibit_logs"
+LOG_FILE = LOG_DIR / "exhibit_log.jsonl"
+ss.setdefault("conv_id", uuid.uuid4().hex[:8])
+
+
+def save_exchange(user_text, bot_text):
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        rec = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "conversation": ss.conv_id,
+               "model": model, "temperature": temperature, "user": user_text, "bot": bot_text}
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # 기록 실패가 관람자의 대화를 막지 않게 한다
+
+
+def exhibit_log_markdown():
+    if not LOG_FILE.exists():
+        return "", 0, 0
+    recs = [json.loads(l) for l in LOG_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    out = ["# 전시 모드 대화 기록", f"- 내려받은 시각: {datetime.now():%Y-%m-%d %H:%M}",
+           f"- 대화 수: {len({r['conversation'] for r in recs})} / 주고받은 횟수: {len(recs)}", ""]
+    cur = None
+    for r in recs:
+        if r["conversation"] != cur:
+            cur = r["conversation"]
+            out += [f"## 대화 {cur} (시작 {r['time']}, 모델 {r['model']}, temperature {r['temperature']})", ""]
+        out += [f"**관람자** ({r['time']}): {r['user']}", "", f"**{BOT_NAME}**: {r['bot']}", ""]
+    return "\n".join(out), len({r["conversation"] for r in recs}), len(recs)
+
+
 # ───────────────── ✏️ 상단 제목 (문구·배치 수정 가능) ─────────────────
 st.title(APP_TITLE)
 if APP_SUBTITLE:
@@ -299,6 +366,7 @@ if EXHIBIT:
         st.error("[관리자 확인 필요] 전시용 API 키가 앱 Secrets에 설정되어 있지 않습니다.")
     if st.button(EXHIBIT_RESET_LABEL):
         ss.messages = []
+        ss.conv_id = uuid.uuid4().hex[:8]   # ✏️ MD팀: 새 관람자는 새 대화 번호로 기록
         st.rerun()
 else:
     missing = [n for n, v in [("API 키", api_key), ("프롬프트문", prompt_text.strip())] if not v]
@@ -312,7 +380,10 @@ if GREETING and not ss.messages:
 
 for m in ss.messages:
     with st.chat_message(m["role"], avatar=BOT_AVATAR if m["role"] == "assistant" else None):
-        st.markdown(m["content"])
+        if m["role"] == "assistant":
+            show_message(m["content"])      # ✏️ MD팀: 글씨색·이미지 적용
+        else:
+            st.markdown(m["content"])
 
 # ✏️ 추천 질문 버튼
 clicked = None
@@ -351,7 +422,12 @@ def ask(q):
 
 
 if question:
+    before = len(ss.messages)
     ask(question)
+    if len(ss.messages) > before:   # ✏️ MD팀: 답변이 저장되면 색·이미지가 적용된 화면으로 다시 그림
+        if EXHIBIT:
+            save_exchange(ss.messages[-2]["content"], ss.messages[-1]["content"])   # ✏️ MD팀: 전시 기록
+        st.rerun()
 
 
 # ───────────────── 🔒 대화 기록 내려받기 (실습 모드) ─────────────────
@@ -366,6 +442,23 @@ if not EXHIBIT and any(m["role"] == "user" for m in ss.messages):
         log += [f"**{who}**: {m['content']}", ""]
     st.download_button("대화 기록 내려받기 (.md)", "\n".join(log).encode("utf-8"),
                        file_name=f"chatbot_log_{datetime.now():%Y%m%d_%H%M}.md", mime="text/markdown")
+
+
+# ───────────────── ✏️ MD팀: 연구자용 기록 내려받기 (전시 모드) ─────────────────
+ADMIN_CODE = str(read_secret("ADMIN_CODE", "")).strip()
+if EXHIBIT and ADMIN_CODE:
+    with st.expander("연구자용"):
+        code = st.text_input("연구자 코드", type="password", key="admin_code_input")
+        if code and code.strip() == ADMIN_CODE:
+            md, n_conv, n_turn = exhibit_log_markdown()
+            if n_turn:
+                st.caption(f"대화 {n_conv}건, 주고받은 횟수 {n_turn}회가 쌓여 있습니다.")
+                st.download_button("전체 대화 기록 내려받기 (.md)", md.encode("utf-8"),
+                                   file_name=f"exhibit_log_{datetime.now():%Y%m%d_%H%M}.md", mime="text/markdown")
+            else:
+                st.caption("아직 쌓인 대화가 없습니다.")
+        elif code:
+            st.caption("코드가 맞지 않습니다.")
 
 
 # ───────────────── 🔒 AI 사용 표기 (삭제 금지) ─────────────────
