@@ -223,7 +223,58 @@ def show_message(content):
     for name in names:
         f = IMAGE_DIR / f"{name}.png"
         if f.exists():
-            st.image(str(f))
+            st.image(str(f), width=320)
+
+
+# ───────────────── ✏️ MD팀: 인물별 말풍선 · 두 사람 대화 ─────────────────
+# 챗봇 답변을 "길소명: …", "명소민: …" 단위로 나누어 인물별 아이콘으로 보여 준다.
+# "두 사람을 대화시키기"는 [대화시키기]·[다음]을 보내고, 매번 말리기/계속 듣기를 묻는다.
+# BOT_TALK_LIMIT번 주고받으면 끝내기 대사(ENDING_TEXT)를 붙이고 대화를 멈춘다.
+CHARACTERS = {"길소명": "🟢", "명소민": "🔵"}
+SPEAKER_LINE = re.compile(r'^[ \t]*\**[ \t]*["“]?(길소명|명소민)["”]?[ \t]*\**[ \t]*[:：][ \t]*\**[ \t]*', re.M)
+CONTROL_LABELS = {"[대화시키기]": "(두 사람을 대화시킵니다)", "[다음]": "(두 사람의 대화를 계속 듣습니다)"}
+STOP_MESSAGE = "둘 다 진정하시고 제 질문에 답해주세요."
+BOT_TALK_LIMIT = 3
+ENDING_TEXT = ("\n\n명소민: 거기 너는 아무 말도 안 하고 뭐 하는 거니? 불쾌해서 더 이상은 말하고 싶지 않네. "
+               "소명이 너도 나중에 나랑 따로 대화하자.\n\n길소명: 네 엄마. 사용자 너는 할 말 없니...?")
+ss.setdefault("talk_mode", "normal")   # normal: 질문하기 / decision: 말리기·계속 듣기 선택
+ss.setdefault("bot_turns", 0)
+
+
+def split_by_speaker(text):
+    found = list(SPEAKER_LINE.finditer(text))
+    if not found:
+        return [(None, text)]
+    parts = []
+    if text[:found[0].start()].strip():
+        parts.append((None, text[:found[0].start()]))
+    for i, m in enumerate(found):
+        end = found[i + 1].start() if i + 1 < len(found) else len(text)
+        parts.append((m.group(1), text[m.end():end]))
+    return parts
+
+
+def show_assistant(content):
+    for who, seg in split_by_speaker(content):
+        seg = seg.strip().strip('"“”').strip()
+        if not seg:
+            continue
+        with st.chat_message("assistant", avatar=CHARACTERS.get(who, BOT_AVATAR)):
+            if who:
+                st.markdown(f"**{who}**")
+            show_message(seg)
+
+
+def show_user(content):
+    label = CONTROL_LABELS.get(content.strip())
+    if label:
+        st.caption(label)
+        return
+    m = re.match(r"\s*\[(길소명|명소민)에게\]\s*", content)
+    if m:
+        st.markdown(f"→ **{m.group(1)}**에게: {content[m.end():]}")
+    else:
+        st.markdown(content)
 
 
 # ───────────────── ✏️ MD팀: 전시 모드 대화 기록 (연구 자료) ─────────────────
@@ -367,6 +418,7 @@ if EXHIBIT:
     if st.button(EXHIBIT_RESET_LABEL):
         ss.messages = []
         ss.conv_id = uuid.uuid4().hex[:8]   # ✏️ MD팀: 새 관람자는 새 대화 번호로 기록
+        ss.talk_mode, ss.bot_turns = "normal", 0
         st.rerun()
 else:
     missing = [n for n, v in [("API 키", api_key), ("프롬프트문", prompt_text.strip())] if not v]
@@ -378,12 +430,15 @@ else:
 if GREETING and not ss.messages:
     ss.messages.append({"role": "assistant", "content": GREETING})
 
-for m in ss.messages:
-    with st.chat_message(m["role"], avatar=BOT_AVATAR if m["role"] == "assistant" else None):
-        if m["role"] == "assistant":
-            show_message(m["content"])      # ✏️ MD팀: 글씨색·이미지 적용
-        else:
-            st.markdown(m["content"])
+if not ss.messages:                     # ✏️ MD팀: 대화를 비우면 두 사람 대화 상태도 처음으로
+    ss.talk_mode, ss.bot_turns = "normal", 0
+
+for m in ss.messages:                   # ✏️ MD팀: 인물별 말풍선·글씨색·이미지
+    if m["role"] == "assistant":
+        show_assistant(m["content"])
+    else:
+        with st.chat_message("user"):
+            show_user(m["content"])
 
 # ✏️ 추천 질문 버튼
 clicked = None
@@ -393,8 +448,32 @@ if SUGGESTED_QUESTIONS and not missing:
         if c.button(q, use_container_width=True, key=f"suggest_{i}"):
             clicked = q
 
-typed = st.chat_input(CHAT_PLACEHOLDER, disabled=bool(missing))
-question = clicked or typed
+# ✏️ MD팀: 대화 상대 선택 · 두 사람 대화(말리기/계속 듣기)
+question = clicked
+bot_talk = False
+action = ""
+if not missing:
+    if ss.talk_mode == "decision":
+        st.warning("두 사람이 대화 중입니다. 개입하시겠습니까?")
+        c1, c2 = st.columns(2)
+        if c1.button("🛑 말리기 (대화 중단)", use_container_width=True):
+            question = STOP_MESSAGE
+            ss.talk_mode, ss.bot_turns = "normal", 0
+        if c2.button("▶️ 말리지 않기 (계속 듣기)", use_container_width=True):
+            question, bot_talk = "[다음]", True
+    else:
+        action = st.radio("어떻게 하시겠습니까?", ["길소명에게 질문하기", "명소민에게 질문하기", "두 사람을 대화시키기"],
+                          horizontal=True)
+        if action == "두 사람을 대화시키기" and st.button("대화 시작!"):
+            question, bot_talk = "[대화시키기]", True
+            ss.bot_turns = 0
+
+typed = st.chat_input(CHAT_PLACEHOLDER, disabled=bool(missing) or ss.talk_mode == "decision")
+if typed:
+    target = "길소명" if action.startswith("길소명") else "명소민" if action.startswith("명소민") else ""
+    question = f"[{target}에게] {typed}" if target and not typed.lstrip().startswith("[") else typed
+if clicked and ss.talk_mode == "decision":
+    ss.talk_mode, ss.bot_turns = "normal", 0
 
 
 # ───────────────── 🔒 엔진 호출 (질문 → 답변) ─────────────────
@@ -425,6 +504,13 @@ if question:
     before = len(ss.messages)
     ask(question)
     if len(ss.messages) > before:   # ✏️ MD팀: 답변이 저장되면 색·이미지가 적용된 화면으로 다시 그림
+        if bot_talk:                 # ✏️ MD팀: 두 사람 대화 횟수 세기, 끝내기 대사
+            ss.bot_turns += 1
+            if ss.bot_turns >= BOT_TALK_LIMIT:
+                ss.messages[-1]["content"] += ENDING_TEXT
+                ss.talk_mode, ss.bot_turns = "normal", 0
+            else:
+                ss.talk_mode = "decision"
         if EXHIBIT:
             save_exchange(ss.messages[-2]["content"], ss.messages[-1]["content"])   # ✏️ MD팀: 전시 기록
         st.rerun()
